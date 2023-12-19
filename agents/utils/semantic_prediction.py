@@ -32,6 +32,29 @@ class SemanticPredMaskRCNN():
         image_list.append(img)
         seg_predictions, vis_output = self.segmentation_model.get_predictions(
             image_list, visualize=args.visualize == 2)
+        
+        '''
+        an example of seg_predictions:
+        [
+            {'instances':
+                Instances(
+                num_instances=1,
+                image_height=480,
+                image_width=640,
+                fields=[pred_boxes: Boxes(tensor([[36.0372,327.9174,124.6251,476.9869]], device='cuda: 0')),
+                scores: tensor([0.9255], device='cuda: 0'),
+                pred_classes: tensor([61], device='cuda: 0'),
+                pred_masks: tensor([
+                [[False, False, False, ..., False, False, False],
+                [False, False, False, ..., False, False, False],
+                [False, False, False, ..., False, False, False],
+                ...,
+                [False, False, False, ..., False, False, False],
+                [False, False, False, ..., False, False, False],
+                [False, False, False, ..., False, False, False]]], device='cuda: 0')])
+            }
+        ]
+        '''
 
         if args.visualize == 2:
             img = vis_output.get_image()
@@ -42,7 +65,7 @@ class SemanticPredMaskRCNN():
                 seg_predictions[0]['instances'].pred_classes.cpu().numpy()):
             if class_idx in list(coco_categories_mapping.keys()):
                 idx = coco_categories_mapping[class_idx]
-                obj_mask = seg_predictions[0]['instances'].pred_masks[j] * 1.
+                obj_mask = seg_predictions[0]['instances'].pred_masks[j] * 1. # turn True/False to 1/0
                 semantic_input[:, :, idx] += obj_mask.cpu().numpy()
 
         return semantic_input, img

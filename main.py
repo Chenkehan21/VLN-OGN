@@ -81,6 +81,19 @@ def main():
     # Starting environments
     torch.set_num_threads(1)
     envs = make_vec_envs(args)
+    # import pdb;pdb.set_trace()
+    '''
+    obs.shape=[1,20,120,160], since args.frame_height=120, args.frame_width=160
+    type(infos): tuple; len(infos) = batchsize
+    type(info): dict;
+    {'distance_to_goal': None, 
+    'spl': None, 
+    'success': None, 
+    'time': 0, 
+    'sensor_pose': [0.0, 0.0, 0.0], 
+    'goal_cat_id': 4, 
+    'goal_name': 'toilet'}
+    '''
     obs, infos = envs.reset()
 
     torch.set_grad_enabled(False)
@@ -88,24 +101,36 @@ def main():
     # Initialize map variables:
     # Full map consists of multiple channels containing the following:
     # 1. Obstacle Map
-    # 2. Exploread Area
+    # 2. Explored Area
     # 3. Current Agent Location
     # 4. Past Agent Locations
     # 5,6,7,.. : Semantic Categories
     nc = args.num_sem_categories + 4  # num channels
 
     # Calculating full and local map sizes
+    # args.global_downscaling = 2
+    # full_w = full_h = 480
+    # local_w, local_h = 240
     map_size = args.map_size_cm // args.map_resolution
     full_w, full_h = map_size, map_size
     local_w = int(full_w / args.global_downscaling)
     local_h = int(full_h / args.global_downscaling)
 
     # Initializing full and local map
+    '''
+    args.map_size_cm is the real world word map size(cm), i.e. (2400cm, 2400cm) <=> (24m, 24m)
+    the paper defined each element in the spatial map(full_map) corresponds to a cell of size (5cm, 5cm) in the physical world
+    args.map_resolution = 5
+    so, the full_map should be (2400 / 5, 2400 / 5) = (480, 480)
+    local_map is half of full_map, i.e. (240, 240)
+    '''
     full_map = torch.zeros(num_scenes, nc, full_w, full_h).float().to(device)
     local_map = torch.zeros(num_scenes, nc, local_w,
                             local_h).float().to(device)
 
     # Initial full and local pose
+    # the paper defined pose.shape=(3,): [x, y, orientation]
+    # full pose: the agent always starts at the center of the map facing east
     full_pose = torch.zeros(num_scenes, 3).float().to(device)
     local_pose = torch.zeros(num_scenes, 3).float().to(device)
 
@@ -121,11 +146,12 @@ def main():
     planner_pose_inputs = np.zeros((num_scenes, 7))
 
     def get_local_map_boundaries(agent_loc, local_sizes, full_sizes):
-        loc_r, loc_c = agent_loc
-        local_w, local_h = local_sizes
-        full_w, full_h = full_sizes
+        loc_r, loc_c = agent_loc # represent agent's position
+        local_w, local_h = local_sizes # (240, 240)
+        full_w, full_h = full_sizes # (480, 480)
 
-        if args.global_downscaling > 1:
+        if args.global_downscaling > 1: # True, since args.global_downscaling = 2
+            # calculate local map boundaries in full_map: width: (gx1, gx2); height: (gy1, gy2)
             gx1, gy1 = loc_r - local_w // 2, loc_c - local_h // 2
             gx2, gy2 = gx1 + local_w, gy1 + local_h
             if gx1 < 0:
@@ -143,31 +169,45 @@ def main():
         return [gx1, gx2, gy1, gy2]
 
     def init_map_and_pose():
+        '''
+        1. Initialize full_map as all zeros
+        2. Initialize agent at the middle of the map
+        3. extract the local map from the full map
+        '''
         full_map.fill_(0.)
-        full_pose.fill_(0.)
+        full_pose.fill_(0.) # [bs, 3]
+        
+        # map_size_cm = 2400
+        # full_pos[0]: [x=12m, y=12m, ori=0], agent always start at the center of the map
         full_pose[:, :2] = args.map_size_cm / 100.0 / 2.0
 
         locs = full_pose.cpu().numpy()
-        planner_pose_inputs[:, :3] = locs
+        planner_pose_inputs[:, :3] = locs # planner_pose_inputs: [x,y,z,gx1,gx2,gy1,gy2]
         for e in range(num_scenes):
-            r, c = locs[e, 1], locs[e, 0]
-            loc_r, loc_c = [int(r * 100.0 / args.map_resolution),
+            r, c = locs[e, 1], locs[e, 0] # r,c = 12; r is x direction, c is y direction
+            loc_r, loc_c = [int(r * 100.0 / args.map_resolution), # loc_r, loc_c = 12 * 100 / 5 = 240
                             int(c * 100.0 / args.map_resolution)]
-
+            
+            # current and past agent location: agent takes a (3,3) square in the middle of the (480, 480) map. 
+            # (3, 3) in spatial map <=> (15cm, 15cm) in physical world
             full_map[e, 2:4, loc_r - 1:loc_r + 2, loc_c - 1:loc_c + 2] = 1.0
 
+            # lmb: [gx1, gx2, gy1, gy2]
             lmb[e] = get_local_map_boundaries((loc_r, loc_c),
                                               (local_w, local_h),
                                               (full_w, full_h))
 
             planner_pose_inputs[e, 3:] = lmb[e]
+            
+            # the origin of the local map is the top-lef corner of local map [6,6,0] meter
             origins[e] = [lmb[e][2] * args.map_resolution / 100.0,
                           lmb[e][0] * args.map_resolution / 100.0, 0.]
 
         for e in range(num_scenes):
-            local_map[e] = full_map[e, :,
-                                    lmb[e, 0]:lmb[e, 1],
-                                    lmb[e, 2]:lmb[e, 3]]
+            # extract the local map
+            local_map[e] = full_map[e, :, lmb[e, 0]:lmb[e, 1], lmb[e, 2]:lmb[e, 3]]
+            
+            # local_pose initialized as (6,6,0) meter
             local_pose[e] = full_pose[e] - \
                 torch.from_numpy(origins[e]).to(device).float()
 
@@ -205,9 +245,9 @@ def main():
         intrinsic_rews[e] *= (args.map_resolution / 100.)**2  # to m^2
 
     init_map_and_pose()
-
+    
     # Global policy observation space
-    ngc = 8 + args.num_sem_categories
+    ngc = 8 + args.num_sem_categories # R,G,B,D,x,y,z,orientation
     es = 2
     g_observation_space = gym.spaces.Box(0, 1,
                                          (ngc,
@@ -215,6 +255,7 @@ def main():
                                           local_h), dtype='uint8')
 
     # Global policy action space
+    # action space is (2, ), why??
     g_action_space = gym.spaces.Box(low=0.0, high=0.99,
                                     shape=(2,), dtype=np.float32)
 
@@ -315,9 +356,10 @@ def main():
         goal_maps[e][global_goals[e][0], global_goals[e][1]] = 1
 
     planner_inputs = [{} for e in range(num_scenes)]
+    
     for e, p_input in enumerate(planner_inputs):
-        p_input['map_pred'] = local_map[e, 0, :, :].cpu().numpy()
-        p_input['exp_pred'] = local_map[e, 1, :, :].cpu().numpy()
+        p_input['map_pred'] = local_map[e, 0, :, :].cpu().numpy() # obstacle map
+        p_input['exp_pred'] = local_map[e, 1, :, :].cpu().numpy() # explored map
         p_input['pose_pred'] = planner_pose_inputs[e]
         p_input['goal'] = goal_maps[e]  # global_goals[e]
         p_input['new_goal'] = 1
@@ -326,8 +368,7 @@ def main():
         if args.visualize or args.print_images:
             local_map[e, -1, :, :] = 1e-5
             p_input['sem_map_pred'] = local_map[e, 4:, :, :
-                                                ].argmax(0).cpu().numpy()
-
+                                                ].argmax(0).cpu().numpy() # all categories
     obs, _, done, infos = envs.plan_act_and_preprocess(planner_inputs)
 
     start = time.time()
@@ -405,6 +446,8 @@ def main():
 
                 full_map[e, :, lmb[e, 0]:lmb[e, 1], lmb[e, 2]:lmb[e, 3]] = \
                     local_map[e]
+                    
+                # full_pose is actually global agent position.
                 full_pose[e] = local_pose[e] + \
                     torch.from_numpy(origins[e]).to(device).float()
 
@@ -478,7 +521,12 @@ def main():
                     extras=g_rollouts.extras[g_step + 1],
                     deterministic=False
                 )
-            cpu_actions = nn.Sigmoid()(g_action).cpu().numpy()
+            cpu_actions = nn.Sigmoid()(g_action).cpu().numpy() # map to (0,1)
+            
+            # global_goals are coarse goals. cpu_action is a proportion in (0,1)
+            # then use the proportion to calculate a long-term movement at x,y axis
+            # remember that g_policy is used to predict long-term goal
+            # will not be executed by agent
             global_goals = [[int(action[0] * local_w),
                              int(action[1] * local_h)]
                             for action in cpu_actions]
@@ -498,9 +546,12 @@ def main():
 
         for e in range(num_scenes):
             goal_maps[e][global_goals[e][0], global_goals[e][1]] = 1
-
+        
+        # if there's no goal object in obs, goal_maps[e].sum()=1
+        # and the goal is located at global goal position
+        # if detected goal object goal_maps[e]=cat_semantic_score (goal's top-down view mask)
         for e in range(num_scenes):
-            cn = infos[e]['goal_cat_id'] + 4
+            cn = infos[e]['goal_cat_id'] + 4 # need to know goal object's category Id
             if local_map[e, cn, :, :].sum() != 0.:
                 cat_semantic_map = local_map[e, cn, :, :].cpu().numpy()
                 cat_semantic_scores = cat_semantic_map
@@ -516,7 +567,7 @@ def main():
             p_input['map_pred'] = local_map[e, 0, :, :].cpu().numpy()
             p_input['exp_pred'] = local_map[e, 1, :, :].cpu().numpy()
             p_input['pose_pred'] = planner_pose_inputs[e]
-            p_input['goal'] = goal_maps[e]  # global_goals[e]
+            p_input['goal'] = goal_maps[e]
             p_input['new_goal'] = l_step == args.num_local_steps - 1
             p_input['found_goal'] = found_goal[e]
             p_input['wait'] = wait_env[e] or finished[e]
@@ -524,7 +575,7 @@ def main():
                 local_map[e, -1, :, :] = 1e-5
                 p_input['sem_map_pred'] = local_map[e, 4:, :,
                                                     :].argmax(0).cpu().numpy()
-
+                
         obs, _, done, infos = envs.plan_act_and_preprocess(planner_inputs)
         # ------------------------------------------------------------------
 

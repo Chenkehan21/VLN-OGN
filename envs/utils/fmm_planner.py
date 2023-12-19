@@ -3,11 +3,13 @@ import numpy as np
 import skfmm
 import skimage
 from numpy import ma
+import matplotlib.pyplot as plt
+from matplotlib.gridspec import GridSpec
 
 
 def get_mask(sx, sy, scale, step_size):
-    size = int(step_size // scale) * 2 + 1
-    mask = np.zeros((size, size))
+    size = int(step_size // scale) * 2 + 1 # size=11
+    mask = np.zeros((size, size)) # (11,11)
     for i in range(size):
         for j in range(size):
             if ((i + 0.5) - (size // 2 + sx)) ** 2 + \
@@ -29,7 +31,7 @@ def get_dist(sx, sy, scale, step_size):
         for j in range(size):
             if ((i + 0.5) - (size // 2 + sx)) ** 2 + \
                ((j + 0.5) - (size // 2 + sy)) ** 2 <= \
-                    step_size ** 2:
+                    step_size  ** 2:
                 mask[i, j] = max(5,
                                  (((i + 0.5) - (size // 2 + sx)) ** 2 +
                                   ((j + 0.5) - (size // 2 + sy)) ** 2) ** 0.5)
@@ -49,7 +51,7 @@ class FMMPlanner():
         else:
             self.traversible = traversible
 
-        self.du = int(self.step_size / (self.scale * 1.))
+        self.du = int(self.step_size / (self.scale * 1.)) # du=5
         self.fmm_dist = None
 
     def set_goal(self, goal, auto_improve=False):
@@ -67,18 +69,33 @@ class FMMPlanner():
         return
 
     def set_multi_goal(self, goal_map):
+        # fig = plt.figure(figsize=(12, 6))
+        # gs = GridSpec(1, 3, width_ratios=[1, 1, 0.2])
+        # ax1 = plt.subplot(gs[0])
+        # ax2 = plt.subplot(gs[1])
+        # ax1.set_title('distance field')
+        # ax2.set_title('processed distance field')
+        
         traversible_ma = ma.masked_values(self.traversible * 1, 0)
         traversible_ma[goal_map == 1] = 0
         dd = skfmm.distance(traversible_ma, dx=1)
+        # im1 = ax1.imshow(dd, cmap='viridis', origin='lower')
+        # cbar_ax = plt.subplot(gs[2])
+        # fig.colorbar(im1, cax=cbar_ax, label='Distance')
+        
         dd = ma.filled(dd, np.max(dd) + 1)
         self.fmm_dist = dd
+        
+        # im2 = ax2.imshow(dd, cmap='viridis', origin='lower')
+        # plt.savefig('/data/ckh/Object-Goal-Navigation/results/images/dd.png')
+        
         return
 
     def get_short_term_goal(self, state):
-        scale = self.scale * 1.
-        state = [x / scale for x in state]
-        dx, dy = state[0] - int(state[0]), state[1] - int(state[1])
-        mask = get_mask(dx, dy, scale, self.step_size)
+        scale = self.scale * 1. # scale = 1
+        state = [x / scale for x in state] # agent location in map(not physical world)
+        dx, dy = state[0] - int(state[0]), state[1] - int(state[1]) # dx=dy=0
+        mask = get_mask(dx, dy, scale, self.step_size) # ring mask
         dist_mask = get_dist(dx, dy, scale, self.step_size)
 
         state = [int(x) for x in state]
@@ -86,7 +103,7 @@ class FMMPlanner():
         dist = np.pad(self.fmm_dist, self.du,
                       'constant', constant_values=self.fmm_dist.shape[0] ** 2)
         subset = dist[state[0]:state[0] + 2 * self.du + 1,
-                      state[1]:state[1] + 2 * self.du + 1]
+                      state[1]:state[1] + 2 * self.du + 1] # dist[x:x+11, y:y+11]
 
         assert subset.shape[0] == 2 * self.du + 1 and \
             subset.shape[1] == 2 * self.du + 1, \
@@ -94,6 +111,10 @@ class FMMPlanner():
 
         subset *= mask
         subset += (1 - mask) * self.fmm_dist.shape[0] ** 2
+        # plt.imshow(subset, cmap='viridis', origin='lower', vmin=0, vmax=250)
+        # plt.colorbar()
+        # plt.savefig('/data/ckh/Object-Goal-Navigation/results/images/subset.png')
+        # plt.cla();plt.close('all')
 
         if subset[self.du, self.du] < 0.25 * 100 / 5.:  # 25cm
             stop = True

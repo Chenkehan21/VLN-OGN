@@ -26,8 +26,8 @@ import envs.utils.rotation_utils as ru
 
 def get_camera_matrix(width, height, fov):
     """Returns a camera matrix from image size and fov."""
-    xc = (width - 1.) / 2.
-    zc = (height - 1.) / 2.
+    xc = (width - 1.) / 2. # x camera
+    zc = (height - 1.) / 2. # z camera
     f = (width / 2.) / np.tan(np.deg2rad(fov / 2.))
     camera_matrix = {'xc': xc, 'zc': zc, 'f': f}
     camera_matrix = Namespace(**camera_matrix)
@@ -127,7 +127,9 @@ def bin_points(XYZ_cms, map_size, z_bins, xy_resolution):
 
 
 def get_point_cloud_from_z_t(Y_t, camera_matrix, device, scale=1):
-    """Projects the depth image Y into a 3D point cloud.
+    """
+    Transform from pixel axis to camera axis.
+    Projects the depth image Y into a 3D point cloud.
     Inputs:
         Y is ...xHxW
         camera_matrix
@@ -137,12 +139,14 @@ def get_point_cloud_from_z_t(Y_t, camera_matrix, device, scale=1):
         Z is positive up in the image
         XYZ is ...xHxWx3
     """
-    grid_x, grid_z = torch.meshgrid(torch.arange(Y_t.shape[-1]),
-                                    torch.arange(Y_t.shape[-2] - 1, -1, -1))
-    grid_x = grid_x.transpose(1, 0).to(device)
-    grid_z = grid_z.transpose(1, 0).to(device)
-    grid_x = grid_x.unsqueeze(0).expand(Y_t.size())
-    grid_z = grid_z.unsqueeze(0).expand(Y_t.size())
+    # Y_t.shape = (batchsize, H, W)
+    # grid_x.shape = grid_z.shape = (W, H)
+    grid_x, grid_z = torch.meshgrid(torch.arange(Y_t.shape[-1]), # grid_x range: [0, H - 1]
+                                    torch.arange(Y_t.shape[-2] - 1, -1, -1)) # grid_z range: [W - 1, 0]
+    grid_x = grid_x.transpose(1, 0).to(device) # (H, W)
+    grid_z = grid_z.transpose(1, 0).to(device) # (H, W)
+    grid_x = grid_x.unsqueeze(0).expand(Y_t.size()) # (batchsize, H, W)
+    grid_z = grid_z.unsqueeze(0).expand(Y_t.size() )# (batchsize, H, W)
 
     X_t = (grid_x[:, ::scale, ::scale] - camera_matrix.xc) * \
         Y_t[:, ::scale, ::scale] / camera_matrix.f
@@ -158,6 +162,7 @@ def get_point_cloud_from_z_t(Y_t, camera_matrix, device, scale=1):
 def transform_camera_view_t(
         XYZ, sensor_height, camera_elevation_degree, device):
     """
+    Transform from camera axis to world axis, height and elevation first
     Transforms the point cloud into geocentric frame to account for
     camera elevation and angle
     Input:
@@ -178,6 +183,7 @@ def transform_camera_view_t(
 
 def transform_pose_t(XYZ, current_pose, device):
     """
+    Transform from camera axis to world axis, x,y,heading second
     Transforms the point cloud into geocentric frame to account for
     camera position
     Input:
@@ -204,49 +210,86 @@ def splat_feat_nd(init_grid, feat, coords):
     Returns:
         grid: B X nF X W X H X D X ..
     """
-    wts_dim = []
+    wts_dim = [] # store weights
     pos_dim = []
-    grid_dims = init_grid.shape[2:]
+    grid_dims = init_grid.shape[2:] # [vr, vr, max_height - min_height]
 
     B = init_grid.shape[0]
-    F = init_grid.shape[1]
+    F = init_grid.shape[1] # num_categories + 1
 
-    n_dims = len(grid_dims)
+    n_dims = len(grid_dims) # n_dims=3
 
-    grid_flat = init_grid.view(B, F, -1)
+    grid_flat = init_grid.view(B, F, -1) # [bs, 17, 100*100*80]
 
+    '''
+    coords: XYZ_cm_std => [bs, 3, x*y]
+    XYZ_cm_std[..., :2] = (XYZ_cm_std[..., :2] / xy_resolution)
+    XYZ_cm_std[..., :2] = (XYZ_cm_std[..., :2] - vision_range // 2.) / vision_range * 2.
+    XYZ_cm_std[..., 2] = XYZ_cm_std[..., 2] / z_resolution
+    XYZ_cm_std[..., 2] = (XYZ_cm_std[..., 2] - (max_h + min_h) // 2.) / (max_h - min_h) * 2.
+    since XYZ_cm_std were normalized, so pos = coords[:, [d], :] * grid_dims[d] / 2 + grid_dims[d] / 2 recovers XYZ_cm_std to unnormalized
+    '''
     for d in range(n_dims):
-        pos = coords[:, [d], :] * grid_dims[d] / 2 + grid_dims[d] / 2
+        pos = coords[:, [d], :] * grid_dims[d] / 2 + grid_dims[d] / 2 # [bs, 1, 19200=120*160]; pos has negative values
         pos_d = []
         wts_d = []
 
         for ix in [0, 1]:
-            pos_ix = torch.floor(pos) + ix
+            # when ix=0, round down; when ix=1, round up
+            pos_ix = torch.floor(pos) + ix # [bs, 19200]
             safe_ix = (pos_ix > 0) & (pos_ix < grid_dims[d])
             safe_ix = safe_ix.type(pos.dtype)
 
+            # when round down: e.g. 1.75 -> 1.0; weight = 1 - abs(1.75 - 1.0) = 0.25;
+            # when round up: e.g. 1.75 -> 1.0 + 1 = 2.0; weight = 1 - abs(1.75 - 2.0) = 0.75
             wts_ix = 1 - torch.abs(pos - pos_ix)
 
-            wts_ix = wts_ix * safe_ix
-            pos_ix = pos_ix * safe_ix
+            wts_ix = wts_ix * safe_ix # positions outside range have weight=0
+            pos_ix = pos_ix * safe_ix # positions outside range are all set to 0
 
             pos_d.append(pos_ix)
             wts_d.append(wts_ix)
 
+        # len(pos_d)=2, len(pos_dim=3) pos_dim = [[[...],[...]],[],[]], pos_dim[0][0].shape=[bs, 1, 19200]
+        # pos_dim[0][0]: x_floor; pos_dim[0][1]: x_ceil
+        # pos_dim[1][0]: y_floor; pos_dim[1][1]: y_ceil
+        # pos_dim[2][0]: z_floor; pos_dim[2][1]: z_ceil
+        # actually pos_dim saves point clouds in vision range, which are truely usefull for subsequent steps
         pos_dim.append(pos_d)
         wts_dim.append(wts_d)
 
     l_ix = [[0, 1] for d in range(n_dims)]
-
     for ix_d in itertools.product(*l_ix):
-        wts = torch.ones_like(wts_dim[0][0])
-        index = torch.zeros_like(wts_dim[0][0])
+        '''
+        each dimension(x,y,z) should consider floor and ceiling
+        ix_d:
+        (0,0,0) => x floor, y floor, z floor
+        (0,0,1) => x floor, y floor, z ceiling
+        (0,1,0) => x floor, y ceiling, z floor
+        (0,1,1) => x floor, y ceiling, z ceiling
+        (1,0,0) => x ceiling, y floor, z floor
+        (1,0,1) => x ceiling, y floor, z ceil
+        (1,1,0) => x ceiling, y ceiling, z floor
+        (1,1,1) => x ceiling, y ceiling, z ceiling
+        '''
+        wts = torch.ones_like(wts_dim[0][0]) # [bs, 1, 19200]
+        index = torch.zeros_like(wts_dim[0][0]) #[bs, 1, 19200]
         for d in range(n_dims):
-            index = index * grid_dims[d] + pos_dim[d][ix_d[d]]
-            wts = wts * wts_dim[d][ix_d[d]]
+            # pos_dim[0]=[floor(x), floor(x) + 1]; len(pos_dim[0])=2
+            # ix_d of first iteration: (0,0,0); ix_d[0]=0
+            # pos_dim[0][0].shape=[bs, 1, 19200]
+            index = index * grid_dims[d] + pos_dim[d][ix_d[d]] # [bs, 1, 19200]
+            wts = wts * wts_dim[d][ix_d[d]] # [bs, 1, 19200]
 
-        index = index.long()
-        grid_flat.scatter_add_(2, index.expand(-1, F, -1), feat * wts)
+        index = index.long() #[bs, 1, 19200]
+        
+        # grid_flat.shape = [bs, 17, 100*100*80]
+        # index.expand(-1, F, -1).shape=[1, 17, 19200] => repeat 17 times
+        # scatter_add_(dim, index, src)
+        # index = [233960(index=0), 241960, ..., 233960(index=320)]
+        # src = feat * wts; feat.shape=[bs, 17, 19200]
+        # grid_flat[233960] = src[0] + src[320]
+        grid_flat.scatter_add_(2, index.expand(-1, F, -1), feat * wts) # [bs, 17, 100*100*80]
         grid_flat = torch.round(grid_flat)
 
-    return grid_flat.view(init_grid.shape)
+    return grid_flat.view(init_grid.shape) # [bs, 17, 100, 100, 80]

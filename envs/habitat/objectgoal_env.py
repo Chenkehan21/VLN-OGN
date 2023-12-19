@@ -4,6 +4,8 @@ import gzip
 import _pickle as cPickle
 import gym
 import numpy as np
+import math
+import random
 import quaternion
 import skimage.morphology
 import habitat
@@ -30,10 +32,10 @@ class ObjectGoal_Env(habitat.RLEnv):
         self.episodes_dir = config_env.DATASET.EPISODES_DIR.format(
             split=self.split)
 
-        dataset_info_file = self.episodes_dir + \
-            "{split}_info.pbz2".format(split=self.split)
-        with bz2.BZ2File(dataset_info_file, 'rb') as f:
-            self.dataset_info = cPickle.load(f)
+        # dataset_info_file = self.episodes_dir + \
+        #     "{split}_info.pbz2".format(split=self.split)
+        # with bz2.BZ2File(dataset_info_file, 'rb') as f:
+        #     self.dataset_info = cPickle.load(f)
 
         # Specifying action and observation space
         self.action_space = gym.spaces.Discrete(3)
@@ -81,7 +83,7 @@ class ObjectGoal_Env(habitat.RLEnv):
         """
 
         args = self.args
-        self.scene_path = self.habitat_env.sim.config.SCENE
+        self.scene_path = self.habitat_env.current_episode.scene_id
         scene_name = self.scene_path.split("/")[-1].split(".")[0]
 
         if self.scene_path != self.last_scene_path:
@@ -101,49 +103,70 @@ class ObjectGoal_Env(habitat.RLEnv):
         self.eps_data_idx += 1
         self.eps_data_idx = self.eps_data_idx % len(self.eps_data)
         pos = episode["start_position"]
-        rot = quaternion.from_float_array(episode["start_rotation"])
+        pos = [0.0, 0., 0.0]
+        self.goal_pos = episode['goals'][0]['position']
+        self.starting_distance = episode['info']['geodesic_distance']
+        self.prev_distance = self.starting_distance
+        rot = episode['start_rotation'][1:] + [episode['start_rotation'][0]]
+        rot = quaternion.from_float_array(rot)
 
-        goal_name = episode["object_category"]
-        goal_idx = episode["object_id"]
-        floor_idx = episode["floor_id"]
+        # goal_name = episode["object_category"]
+        # goal_idx = episode["object_id"]
+        # floor_idx = episode["floor_id"]
+        
+        goal_name = episode.get('object_category', 'tv')
+        goal_idx = episode.get('object_category', 1)
 
         # Load scene info
-        scene_info = self.dataset_info[scene_name]
-        sem_map = scene_info[floor_idx]['sem_map']
-        map_obj_origin = scene_info[floor_idx]['origin']
+        # scene_info = self.dataset_info[scene_name]
+        # sem_map = scene_info[floor_idx]['sem_map']
+        # map_obj_origin = scene_info[floor_idx]['origin']
 
         # Setup ground truth planner
         object_boundary = args.success_dist
         map_resolution = args.map_resolution
         selem = skimage.morphology.disk(2)
-        traversible = skimage.morphology.binary_dilation(
-            sem_map[0], selem) != True
-        traversible = 1 - traversible
-        planner = FMMPlanner(traversible)
-        selem = skimage.morphology.disk(
-            int(object_boundary * 100. / map_resolution))
-        goal_map = skimage.morphology.binary_dilation(
-            sem_map[goal_idx + 1], selem) != True
-        goal_map = 1 - goal_map
-        planner.set_multi_goal(goal_map)
+        
+        # sem_map.shape: (16, 149, 239)
+        # sem_map[0] is a top-down view house slice with noise, so need to be dilated
+        # traversible = skimage.morphology.binary_dilation(
+        #     sem_map[0], selem) != True
+        # traversible = 1 - traversible
+        # planner = FMMPlanner(traversible)
+        # selem = skimage.morphology.disk(
+        #     int(object_boundary * 100. / map_resolution))
+        
+        # sem_map[1:16] are 15 goal maps
+        # goal_map = skimage.morphology.binary_dilation(
+        #     sem_map[goal_idx + 1], selem) != True
+        # goal_map = 1 - goal_map
+        # planner.set_multi_goal(goal_map)
 
         # Get starting loc in GT map coordinates
         x = -pos[2]
         y = -pos[0]
-        min_x, min_y = map_obj_origin / 100.0
-        map_loc = int((-y - min_y) * 20.), int((-x - min_x) * 20.)
+        # min_x, min_y = map_obj_origin / 100.0
+        # map_loc = int((-y - min_y) * 20.), int((-x - min_x) * 20.)
 
-        self.gt_planner = planner
-        self.starting_loc = map_loc
+        # self.gt_planner = planner
+        # self.starting_loc = map_loc
         self.object_boundary = object_boundary
         self.goal_idx = goal_idx
         self.goal_name = goal_name
-        self.map_obj_origin = map_obj_origin
+        # self.map_obj_origin = map_obj_origin
 
-        self.starting_distance = self.gt_planner.fmm_dist[self.starting_loc]\
-            / 20.0 + self.object_boundary
-        self.prev_distance = self.starting_distance
-        self._env.sim.set_agent_state(pos, rot)
+        # self.starting_distance = self.gt_planner.fmm_dist[self.starting_loc]\
+        #     / 20.0 + self.object_boundary
+        # self.prev_distance = self.starting_distance
+        
+        agent_state = self._env.sim.get_agent_state(0)
+        agent_state.sensor_states = {}
+        agent_state.position = pos
+        agent_state.rotation=rot
+        # agent_state.sensor_states = self.habitat_env.
+        # self._env.sim.set_agent_state(pos, rot)
+        self._env.sim.agents[0].set_state(agent_state, reset_sensors=True, infer_sensor_states=True)
+        agent_state = self._env.sim.get_agent_state(0)
 
         # The following two should match approximately
         # print(starting_loc)
@@ -160,7 +183,7 @@ class ObjectGoal_Env(habitat.RLEnv):
 
         args = self.args
 
-        self.scene_path = self.habitat_env.sim.config.SCENE
+        self.scene_path = self.habitat_env.current_episode.scene_id
         scene_name = self.scene_path.split("/")[-1].split(".")[0]
 
         scene_info = self.dataset_info[scene_name]
@@ -242,15 +265,16 @@ class ObjectGoal_Env(habitat.RLEnv):
         rvec[1] = np.random.rand() * 2 * np.pi
         rot = quaternion.from_rotation_vector(rvec)
 
-        self.gt_planner = planner
+        # self.gt_planner = planner
         self.starting_loc = map_loc
         self.object_boundary = object_boundary
         self.goal_idx = goal_idx
         self.goal_name = goal_name
         self.map_obj_origin = map_obj_origin
 
-        self.starting_distance = self.gt_planner.fmm_dist[self.starting_loc] \
-            / 20.0 + self.object_boundary
+        # self.starting_distance = self.gt_planner.fmm_dist[self.starting_loc] \
+        #     / 20.0 + self.object_boundary
+        self.starting_distance = self.eps_data['info']['geodesic_distance']
         self.prev_distance = self.starting_distance
 
         self._env.sim.set_agent_state(pos, rot)
@@ -291,7 +315,7 @@ class ObjectGoal_Env(habitat.RLEnv):
         """Converts absolute Habitat simulator pose to ground-truth 2D Map
         coordinates.
         """
-        x, y, o = sim_loc
+        x, y, o = sim_loc # x to right; y to down
         min_x, min_y = self.map_obj_origin / 100.0
         x, y = int((-x - min_x) * 20.), int((-y - min_y) * 20.)
 
@@ -319,12 +343,14 @@ class ObjectGoal_Env(habitat.RLEnv):
 
         if new_scene:
             obs = super().reset()
-            self.scene_name = self.habitat_env.sim.config.SCENE
+            
+            # data/scene_datasets/gibson_semantic//Collierville.glb
+            self.scene_name = self.habitat_env.current_episode.scene_id
             print("Changing scene: {}/{}".format(self.rank, self.scene_name))
 
-        self.scene_path = self.habitat_env.sim.config.SCENE
+        self.scene_path = self.habitat_env.current_episode.scene_id
 
-        if self.split == "val":
+        if self.split == "val_unseen":
             obs = self.load_new_episode()
         else:
             obs = self.generate_new_episode()
@@ -363,6 +389,10 @@ class ObjectGoal_Env(habitat.RLEnv):
             # Not sending stop to simulator, resetting manually
             action = 3
 
+        curr_state = self._env.sim.get_agent_state(0)
+        # action = random.choice([1,2,3])
+        # action = 2
+        # print(curr_state, action)
         obs, rew, done, _ = super().step(action)
 
         # Get pose change
@@ -391,14 +421,15 @@ class ObjectGoal_Env(habitat.RLEnv):
         return (0., 1.0)
 
     def get_reward(self, observations):
-        curr_loc = self.sim_continuous_to_sim_map(self.get_sim_location())
-        self.curr_distance = self.gt_planner.fmm_dist[curr_loc[0],
-                                                      curr_loc[1]] / 20.0
+        # curr_loc = self.sim_continuous_to_sim_map(self.get_sim_location())
+        # self.curr_distance = self.gt_planner.fmm_dist[curr_loc[0],
+        #                                               curr_loc[1]] / 20.0
 
-        reward = (self.prev_distance - self.curr_distance) * \
-            self.args.reward_coeff
+        # reward = (self.prev_distance - self.curr_distance) * \
+        #     self.args.reward_coeff
 
-        self.prev_distance = self.curr_distance
+        # self.prev_distance = self.curr_distance
+        reward = 1
         return reward
 
     def get_metrics(self):
@@ -412,8 +443,12 @@ class ObjectGoal_Env(habitat.RLEnv):
                         from the success threshold boundary in meters.
                         (See https://arxiv.org/pdf/2007.00643.pdf)
         """
-        curr_loc = self.sim_continuous_to_sim_map(self.get_sim_location())
-        dist = self.gt_planner.fmm_dist[curr_loc[0], curr_loc[1]] / 20.0
+        curr_state = self._env.sim.get_agent_state(0)
+        curr_x = curr_state.position[2]
+        curr_y = curr_state.position[0]
+        goal_x, goal_y = self.goal_pos[2], self.goal_pos[0]
+        dist = math.sqrt(((curr_x - goal_x)**2 + (curr_y - goal_y)**2))
+        
         if dist == 0.0:
             success = 1
         else:

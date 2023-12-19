@@ -5,6 +5,8 @@ import numpy as np
 import skimage.morphology
 from PIL import Image
 from torchvision import transforms
+import matplotlib.pyplot as plt
+from matplotlib.colors import ListedColormap
 
 from envs.utils.fmm_planner import FMMPlanner
 from envs.habitat.objectgoal_env import ObjectGoal_Env
@@ -28,7 +30,7 @@ class Sem_Exp_Env_Agent(ObjectGoal_Env):
         # initialize transform for RGB observations
         self.res = transforms.Compose(
             [transforms.ToPILImage(),
-             transforms.Resize((args.frame_height, args.frame_width),
+             transforms.Resize((args.frame_height, args.frame_width), # (120, 160)
                                interpolation=Image.NEAREST)])
 
         # initialize semantic segmentation prediction model
@@ -67,7 +69,7 @@ class Sem_Exp_Env_Agent(ObjectGoal_Env):
         # Episode initializations
         map_shape = (args.map_size_cm // args.map_resolution,
                      args.map_size_cm // args.map_resolution)
-        self.collision_map = np.zeros(map_shape)
+        self.collision_map = np.zeros(map_shape) # (480,480)
         self.visited = np.zeros(map_shape)
         self.visited_vis = np.zeros(map_shape)
         self.col_width = 1
@@ -111,7 +113,7 @@ class Sem_Exp_Env_Agent(ObjectGoal_Env):
         # Reset reward if new long-term goal
         if planner_inputs["new_goal"]:
             self.info["g_reward"] = 0
-
+            
         action = self._plan(planner_inputs)
 
         if self.args.visualize or self.args.print_images:
@@ -158,12 +160,16 @@ class Sem_Exp_Env_Agent(ObjectGoal_Env):
         self.last_loc = self.curr_loc
 
         # Get Map prediction
-        map_pred = np.rint(planner_inputs['map_pred'])
+        map_pred = np.rint(planner_inputs['map_pred']) # obstacle map
+        
+        # if there's no goal object in obs, goal_maps[e].sum()=1
+        # and the goal is located at global goal position
+        # if detected goal object goal_maps[e] will be a tensor with shape (240,240)
+        # and locations that is object with value=1 others with value=0 (actually it's a semantic mask)
         goal = planner_inputs['goal']
 
         # Get pose prediction and global policy planning window
-        start_x, start_y, start_o, gx1, gx2, gy1, gy2 = \
-            planner_inputs['pose_pred']
+        start_x, start_y, start_o, gx1, gx2, gy1, gy2 = planner_inputs['pose_pred']
         gx1, gx2, gy1, gy2 = int(gx1), int(gx2), int(gy1), int(gy2)
         planning_window = [gx1, gx2, gy1, gy2]
 
@@ -171,9 +177,10 @@ class Sem_Exp_Env_Agent(ObjectGoal_Env):
         self.curr_loc = [start_x, start_y, start_o]
         r, c = start_y, start_x
         start = [int(r * 100.0 / args.map_resolution - gx1),
-                 int(c * 100.0 / args.map_resolution - gy1)]
+                 int(c * 100.0 / args.map_resolution - gy1)] # get agent's location in local map
         start = pu.threshold_poses(start, map_pred.shape)
-
+        
+        # self.visited is a point
         self.visited[gx1:gx2, gy1:gy2][start[0] - 0:start[0] + 1,
                                        start[1] - 0:start[1] + 1] = 1
 
@@ -189,6 +196,7 @@ class Sem_Exp_Env_Agent(ObjectGoal_Env):
                              self.visited_vis[gx1:gx2, gy1:gy2])
 
         # Collision check
+        # 0: stop, 1: forward, 2: left, 3: right
         if self.last_action == 1:
             x1, y1, t1 = self.last_loc
             x2, y2, _ = self.curr_loc
@@ -209,19 +217,15 @@ class Sem_Exp_Env_Agent(ObjectGoal_Env):
                 width = self.col_width
                 for i in range(length):
                     for j in range(width):
-                        wx = x1 + 0.05 * \
-                            ((i + buf) * np.cos(np.deg2rad(t1))
-                             + (j - width // 2) * np.sin(np.deg2rad(t1)))
-                        wy = y1 + 0.05 * \
-                            ((i + buf) * np.sin(np.deg2rad(t1))
-                             - (j - width // 2) * np.cos(np.deg2rad(t1)))
-                        r, c = wy, wx
+                        wx = x1 + 0.05 * ((i + buf) * np.cos(np.deg2rad(t1)) + (j - width // 2) * np.sin(np.deg2rad(t1))) # horizontal
+                        wy = y1 + 0.05 * ((i + buf) * np.sin(np.deg2rad(t1)) - (j - width // 2) * np.cos(np.deg2rad(t1))) # vertical
+                        r, c = wy, wx # r is vertical direction; c is horizontal direction
                         r, c = int(r * 100 / args.map_resolution), \
                             int(c * 100 / args.map_resolution)
                         [r, c] = pu.threshold_poses([r, c],
                                                     self.collision_map.shape)
                         self.collision_map[r, c] = 1
-
+        
         stg, stop = self._get_stg(map_pred, start, np.copy(goal),
                                   planning_window)
 
@@ -250,8 +254,15 @@ class Sem_Exp_Env_Agent(ObjectGoal_Env):
         return action
 
     def _get_stg(self, grid, start, goal, planning_window):
-        """Get short-term goal"""
-
+        """
+        Get short-term goal
+        
+        grid: predicted obstacle map
+        start: agent location
+        goal: goal object semantic mask
+        palnning window: local map boundary
+        """
+        
         [gx1, gx2, gy1, gy2] = planning_window
 
         x1, y1, = 0, 0
@@ -263,19 +274,20 @@ class Sem_Exp_Env_Agent(ObjectGoal_Env):
             new_mat[1:h + 1, 1:w + 1] = mat
             return new_mat
 
-        traversible = skimage.morphology.binary_dilation(
-            grid[x1:x2, y1:y2],
-            self.selem) != True
-        traversible[self.collision_map[gx1:gx2, gy1:gy2]
-                    [x1:x2, y1:y2] == 1] = 0
+        # dilate obstacles
+        # not dilated places are traversable which are set to True(1)
+        traversible = skimage.morphology.binary_dilation(grid[x1:x2, y1:y2],self.selem) != True
+        
+        # obstacles are set to 0; type(traversible)=ndarray; dtype is bool
+        traversible[self.collision_map[gx1:gx2, gy1:gy2][x1:x2, y1:y2] == 1] = 0
         traversible[self.visited[gx1:gx2, gy1:gy2][x1:x2, y1:y2] == 1] = 1
-
         traversible[int(start[0] - x1) - 1:int(start[0] - x1) + 2,
                     int(start[1] - y1) - 1:int(start[1] - y1) + 2] = 1
-
+        
+        # after add_boudary, traversible's dtype is float64
         traversible = add_boundary(traversible)
+        
         goal = add_boundary(goal, value=0)
-
         planner = FMMPlanner(traversible)
         selem = skimage.morphology.disk(10)
         goal = skimage.morphology.binary_dilation(
@@ -292,42 +304,48 @@ class Sem_Exp_Env_Agent(ObjectGoal_Env):
 
     def _preprocess_obs(self, obs, use_seg=True):
         args = self.args
-        obs = obs.transpose(1, 2, 0)
+        obs = obs.transpose(1, 2, 0) # after transpose: obs is height, width, channel(RGBD)
         rgb = obs[:, :, :3]
         depth = obs[:, :, 3:4]
 
         sem_seg_pred = self._get_sem_pred(
             rgb.astype(np.uint8), use_seg=use_seg)
+        
+        # after preprocess, depth's shape is (height, width)
         depth = self._preprocess_depth(depth, args.min_depth, args.max_depth)
 
-        ds = args.env_frame_width // args.frame_width  # Downscaling factor
+        # ds: Downscaling factor
+        # args.env_frame_width = 640, args.frame_width = 160
+        ds = args.env_frame_width // args.frame_width # ds = 4
         if ds != 1:
-            rgb = np.asarray(self.res(rgb.astype(np.uint8)))
-            depth = depth[ds // 2::ds, ds // 2::ds]
+            rgb = np.asarray(self.res(rgb.astype(np.uint8))) # resize
+            depth = depth[ds // 2::ds, ds // 2::ds] # down scaling start from 2, step=4
             sem_seg_pred = sem_seg_pred[ds // 2::ds, ds // 2::ds]
 
-        depth = np.expand_dims(depth, axis=2)
+        depth = np.expand_dims(depth, axis=2) # recover depth.shape to (height, width, 1)
         state = np.concatenate((rgb, depth, sem_seg_pred),
                                axis=2).transpose(2, 0, 1)
 
-        return state
+        return state # (c, h, w), c = 3(RGB) + 1(Depth) + 16(CoCo categories) = 20; h = 120; w = 160
 
     def _preprocess_depth(self, depth, min_d, max_d):
+        # Preprocesses a depth map by handling missing values, removing outliers, and scaling the depth values.
         depth = depth[:, :, 0] * 1
 
         for i in range(depth.shape[1]):
             depth[:, i][depth[:, i] == 0.] = depth[:, i].max()
 
-        mask2 = depth > 0.99
+        mask2 = depth > 0.99 # turn too far pixels to invalid
         depth[mask2] = 0.
 
         mask1 = depth == 0
-        depth[mask1] = 100.0
+        depth[mask1] = 100.0 # then turn all invalid pixels to vision_range(100)
         depth = min_d * 100.0 + depth * max_d * 100.0
         return depth
 
     def _get_sem_pred(self, rgb, use_seg=True):
         if use_seg:
+            # use pretrained mask rcnn to do instance segmentation
             semantic_pred, self.rgb_vis = self.sem_pred.get_prediction(rgb)
             semantic_pred = semantic_pred.astype(np.float32)
         else:
@@ -344,51 +362,67 @@ class Sem_Exp_Env_Agent(ObjectGoal_Env):
         if not os.path.exists(ep_dir):
             os.makedirs(ep_dir)
 
-        map_pred = inputs['map_pred']
-        exp_pred = inputs['exp_pred']
+        map_pred = inputs['map_pred'] # obstacle map: local_map[0, :, :]
+        exp_pred = inputs['exp_pred'] # explored map: local_map[1, :, :]
         start_x, start_y, start_o, gx1, gx2, gy1, gy2 = inputs['pose_pred']
 
         goal = inputs['goal']
-        sem_map = inputs['sem_map_pred']
+        sem_map = inputs['sem_map_pred'] # all categories: local_map[4:, :, :]
 
         gx1, gx2, gy1, gy2 = int(gx1), int(gx2), int(gy1), int(gy2)
 
+        # 1: obstacle map;
+        # 2: explored map;
+        # 3: current agent location;
+        # 4: past agent location
+        # 5~19: coco categories
+        # 20: not a category
         sem_map += 5
-
+        
         no_cat_mask = sem_map == 20
         map_mask = np.rint(map_pred) == 1
         exp_mask = np.rint(exp_pred) == 1
         vis_mask = self.visited_vis[gx1:gx2, gy1:gy2] == 1
 
-        sem_map[no_cat_mask] = 0
+        sem_map[no_cat_mask] = 0 # outside the map
         m1 = np.logical_and(no_cat_mask, exp_mask)
-        sem_map[m1] = 2
+        sem_map[m1] = 2 # navigable area
 
         m2 = np.logical_and(no_cat_mask, map_mask)
-        sem_map[m2] = 1
+        sem_map[m2] = 1 # walls(obstacle)
 
-        sem_map[vis_mask] = 3
+        sem_map[vis_mask] = 3 # agent's trajectory
 
         selem = skimage.morphology.disk(4)
         goal_mat = 1 - skimage.morphology.binary_dilation(
             goal, selem) != True
 
         goal_mask = goal_mat == 1
-        sem_map[goal_mask] = 4
+        sem_map[goal_mask] = 4 # predicted goal
 
+        # create a color palette including 20 colors
         color_pal = [int(x * 255.) for x in color_palette]
+        
+        # create a new image using palette mode(https://pillow.readthedocs.io/en/stable/handbook/concepts.html#concept-modes)
+        # in this mode, we can map colors to picture use a color palette
         sem_map_vis = Image.new("P", (sem_map.shape[1],
                                       sem_map.shape[0]))
         sem_map_vis.putpalette(color_pal)
+        
+        # put the flattened data, so that each instance will be mapped a color according to color palette
         sem_map_vis.putdata(sem_map.flatten().astype(np.uint8))
         sem_map_vis = sem_map_vis.convert("RGB")
+        # sem_map_vis.save('/data/ckh/Object-Goal-Navigation/results/images/eps_{}-{}-{}-Vis-{}.png'.format(self.episode_no,
+                # self.rank, self.episode_no, self.timestep))
+                
+        # flip image up and down, so that agnet's turn in simulator is the same as its turn in semantic map visualization
         sem_map_vis = np.flipud(sem_map_vis)
 
-        sem_map_vis = sem_map_vis[:, :, [2, 1, 0]]
+        sem_map_vis = sem_map_vis[:, :, [2, 1, 0]] # turn to bgr for opencv
         sem_map_vis = cv2.resize(sem_map_vis, (480, 480),
                                  interpolation=cv2.INTER_NEAREST)
-        self.vis_image[50:530, 15:655] = self.rgb_vis
-        self.vis_image[50:530, 670:1150] = sem_map_vis
+        self.vis_image[50:530, 15:655] = self.rgb_vis # 480, 640
+        self.vis_image[50:530, 670:1150] = sem_map_vis # 480, 480
 
         pos = (
             (start_x * 100. / args.map_resolution - gy1)
@@ -397,12 +431,12 @@ class Sem_Exp_Env_Agent(ObjectGoal_Env):
             * 480 / map_pred.shape[1],
             np.deg2rad(-start_o)
         )
-
         agent_arrow = vu.get_contour_points(pos, origin=(670, 50))
+        cv2.waitKey(1)
         color = (int(color_palette[11] * 255),
                  int(color_palette[10] * 255),
                  int(color_palette[9] * 255))
-        cv2.drawContours(self.vis_image, [agent_arrow], 0, color, -1)
+        cv2.drawContours(self.vis_image, [agent_arrow], 0, color, -1) # draw agent arrow
 
         if args.visualize:
             # Displaying the image

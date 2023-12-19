@@ -70,7 +70,7 @@ def get_args():
     parser.add_argument('-el', '--max_episode_length', type=int, default=500,
                         help="""Maximum episode length""")
     parser.add_argument("--task_config", type=str,
-                        default="tasks/objectnav_gibson.yaml",
+                        default="tasks/vln_mp3d.yaml",
                         help="path to config yaml containing task information")
     parser.add_argument("--split", type=str, default="train",
                         help="dataset split (train | val | val_mini) ")
@@ -165,6 +165,8 @@ def get_args():
             elif "objectnav_gibson" in args.task_config and \
                     "val" in args.split:
                 args.total_num_scenes = 5
+            elif "vln_mp3d" in args.task_config and "val_unseen" in args.split:
+                args.total_num_scenes = 5
             else:
                 assert False, "Unknown task config, please specify" + \
                     " total_num_scenes"
@@ -196,20 +198,20 @@ def get_args():
                 assert max_threads >= args.total_num_scenes, \
                     """Insufficient GPU memory for evaluation"""
 
-            if num_gpus == 1:
-                args.num_processes_on_first_gpu = num_processes_on_first_gpu
-                args.num_processes_per_gpu = 0
-                args.num_processes = num_processes_on_first_gpu
-                assert args.num_processes > 0, "Insufficient GPU memory"
-            else:
-                num_threads = num_processes_per_gpu * (num_gpus - 1) \
-                    + num_processes_on_first_gpu
-                num_threads = min(num_threads, args.total_num_scenes)
-                args.num_processes_per_gpu = num_processes_per_gpu
-                args.num_processes_on_first_gpu = max(
-                    0,
-                    num_threads - args.num_processes_per_gpu * (num_gpus - 1))
-                args.num_processes = num_threads
+            # if num_gpus == 1:
+            #     args.num_processes_on_first_gpu = num_processes_on_first_gpu
+            #     args.num_processes_per_gpu = 0
+            #     args.num_processes = num_processes_on_first_gpu
+            #     assert args.num_processes > 0, "Insufficient GPU memory"
+            # else:
+            #     num_threads = num_processes_per_gpu * (num_gpus - 1) \
+            #         + num_processes_on_first_gpu
+            #     num_threads = min(num_threads, args.total_num_scenes)
+            #     args.num_processes_per_gpu = num_processes_per_gpu
+            #     args.num_processes_on_first_gpu = max(
+            #         0,
+            #         num_threads - args.num_processes_per_gpu * (num_gpus - 1))
+            #     args.num_processes = num_threads
 
             args.sim_gpu_id = 1
 

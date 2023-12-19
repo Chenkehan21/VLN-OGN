@@ -48,6 +48,7 @@ def init_vis_image(goal_name, legend):
                             cv2.LINE_AA)
 
     # draw outlines
+    # Obeservation: (640, 480); semantic map: (480, 480)
     color = [100, 100, 100]
     vis_image[49, 15:655] = color
     vis_image[49, 670:1150] = color
